@@ -86,30 +86,4 @@ if __name__ == "__main__":
 * Promotions that are present but invalid are nullified (keeps the sale record but removes the invalid promotion).
 * The predictive target (`target_future_spend`) is a synthetic target derived from historic spend and observed totals; replace with a business target when available.
 
----
 
-## Quick troubleshooting
-
-* If the script prints `Hey, I can't find <file>`, ensure the CSV filename exactly matches (case sensitive on some OS) and is in the working directory.
-* If modeling prints "Not enough data points...", you need at least 3 distinct customers in the cleaned data for the included train/test split.
-* If you see parsing errors for dates, check date formats in `store_sales_header.csv` and `stores.csv`.
-
----
-
-## Extending this project (ideas)
-
-* Add unit tests and sample fixtures (small CSVs) for automated CI validation.
-* Export model artifacts (pickle) and provide a scoring function / REST endpoint.
-* Enhance feature engineering (recency, frequency, monetary, product affinity, seasonality).
-* Add a Phase 2 that performs schema validation and column type enforcement with a library like `pandera`.
-
----
-
-## License & Author
-
-* Author: (your name)
-* License: MIT (or your preferred license)
-
----
-
-If you want, I can also produce a `requirements.txt`, a CLI wrapper, or convert this README into a `README.md` file in the repo for you.
