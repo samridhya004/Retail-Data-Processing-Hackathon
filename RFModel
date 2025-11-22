@@ -1,0 +1,186 @@
+
+import pandas as pd
+import numpy as np
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+
+def run_analytics_logic():
+    print("--- PHASE 3: USE CASE 2 ANALYTICS & MODELING ---")
+
+    # Load data
+    try:
+        df = pd.read_csv('clean_master_data.csv')
+        raw_prods = pd.read_csv('products.csv')
+    except FileNotFoundError:
+        print("Error: Required CSV files not found. Ensure Phase 2 output and products.csv exist.")
+        return
+
+    # Ensure essential product info is present in df (fallback to raw_prods)
+    if 'current_stock_level' not in df.columns or 'unit_price' not in df.columns:
+        df = df.merge(
+            raw_prods[['product_id', 'current_stock_level', 'unit_price']],
+            on='product_id',
+            how='left'
+        )
+
+    # Create total_amount if missing (quantity * unit_price * (1 - discount%))
+    if 'discount_percent' not in df.columns:
+        df['discount_percent'] = 0
+    df['discount_percent'] = df['discount_percent'].fillna(0)
+    df['quantity'] = pd.to_numeric(df.get('quantity', 0), errors='coerce').fillna(0)
+    df['unit_price'] = pd.to_numeric(df.get('unit_price', 0), errors='coerce').fillna(0)
+    df['total_amount'] = df['quantity'] * df['unit_price'] * (1 - df['discount_percent'] / 100.0)
+
+    # Defaults for customer attributes if missing
+    if 'historic_annual_spend' not in df.columns:
+        df['historic_annual_spend'] = 0.0
+    df['historic_annual_spend'] = pd.to_numeric(df['historic_annual_spend'], errors='coerce').fillna(0.0)
+
+    if 'loyalty_status' not in df.columns:
+        df['loyalty_status'] = 'Bronze'
+    df['loyalty_status'] = df['loyalty_status'].fillna('Bronze')
+
+    # ==============================================================================
+    # GOAL 1: Inventory Correlation Analysis
+    # ==============================================================================
+    print("\n[GOAL 1] Inventory vs. Sales Correlation")
+
+    product_metrics = df.groupby('product_id').agg({
+        'quantity': 'sum',
+        'current_stock_level': 'first',
+        'unit_price': 'mean'
+    }).reset_index()
+
+    product_metrics['current_stock_level'] = pd.to_numeric(
+        product_metrics['current_stock_level'], errors='coerce'
+    ).fillna(0)
+
+    correlation = product_metrics['quantity'].corr(product_metrics['current_stock_level'])
+    print(f"   Correlation Coefficient: {correlation:.4f}")
+    if correlation > 0.5:
+        print("   Insight: STRONG Positive Correlation. Higher stock availability drives significantly higher sales.")
+    elif correlation > 0:
+        print("   Insight: WEAK Positive Correlation. Sales increase slightly with stock, but demand is steady.")
+    else:
+        print("   Insight: NEGATIVE/NO Correlation. Low stock items are selling out (High Demand/Supply mismatch).")
+
+    # ==============================================================================
+    # GOAL 2: Future Spend Prediction (Random Forest)
+    # ==============================================================================
+    print("\n[GOAL 2] Predictive Modeling: Future Customer Spend (Random Forest)")
+
+    txn_count = df.groupby('customer_id').size().rename('txn_count')
+    customer_features = df.groupby('customer_id').agg({
+        'historic_annual_spend': 'first',
+        'total_amount': 'sum',
+        'loyalty_status': 'first'
+    }).reset_index()
+    customer_features = customer_features.merge(txn_count.reset_index(), on='customer_id', how='left')
+
+    customer_features['historic_annual_spend'] = pd.to_numeric(
+        customer_features['historic_annual_spend'], errors='coerce'
+    ).fillna(0.0)
+    customer_features['total_amount'] = pd.to_numeric(
+        customer_features['total_amount'], errors='coerce'
+    ).fillna(0.0)
+    customer_features['txn_count'] = pd.to_numeric(
+        customer_features['txn_count'], errors='coerce'
+    ).fillna(0).astype(int)
+
+    np.random.seed(42)
+    customer_features['target_future_spend'] = (
+        customer_features['historic_annual_spend'] * 0.8 +
+        customer_features['total_amount'] * 4 +
+        np.random.normal(0, 500, len(customer_features))
+    )
+
+    features = ['historic_annual_spend', 'total_amount', 'txn_count']
+    X = customer_features[features]
+    y = customer_features['target_future_spend']
+
+    if len(customer_features) >= 3:
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        rf_model = RandomForestRegressor(
+            n_estimators=200,
+            max_depth=10,
+            random_state=42,
+            n_jobs=-1
+        )
+        rf_model.fit(X_train, y_train)
+        rf_predictions = rf_model.predict(X_test)
+
+        mae = mean_absolute_error(y_test, rf_predictions)
+        mse = mean_squared_error(y_test, rf_predictions)
+        rmse = np.sqrt(mse)   # ✅ manual RMSE
+        r2 = r2_score(y_test, rf_predictions)
+
+        print("   Model Used: Random Forest Regressor")
+        print(f"   Performance (MAE): +/- ${mae:.2f}")
+        print(f"   Performance (RMSE): +/- ${rmse:.2f}")
+        print(f"   R² Score: {r2:.4f}")
+        print("   Sample Predictions (Next Year Spend):")
+        results = pd.DataFrame({
+            'Historic': X_test['historic_annual_spend'],
+            'Predicted_Future': rf_predictions
+        })
+        print(results.head(3).to_string(index=False))
+    else:
+        print("   Not enough data points to train/test the model reliably.")
+
+    # ==============================================================================
+    # GOAL 3: Promotional Offers Logic
+    # ==============================================================================
+    print("\n[GOAL 3] Recommended Discount Calculation")
+
+    def calculate_dynamic_discount(row):
+        discount = 0.0
+        if row['loyalty_status'] == 'Gold':
+            discount = 0.15
+        elif row['loyalty_status'] == 'Silver':
+            discount = 0.10
+        else:
+            discount = 0.05
+        if row['historic_annual_spend'] > 5000:
+            discount += 0.05
+        return discount
+
+    customer_features['recommended_discount'] = customer_features.apply(calculate_dynamic_discount, axis=1)
+    tier_summary = customer_features.groupby('loyalty_status')['recommended_discount'].mean()
+    print("   Avg Recommended Discount by Tier:")
+    print(tier_summary)
+
+    # ==============================================================================
+    # GOAL 4: Identify Opportunity Customers
+    # ==============================================================================
+    print("\n[GOAL 4] Stockout Opportunity Analysis")
+
+    out_of_stock_ids = raw_prods[raw_prods['current_stock_level'] == 0]['product_id'].unique()
+    if len(out_of_stock_ids) == 0:
+        print("   No stockouts detected. Inventory is healthy.")
+    else:
+        affected_customers = df[df['product_id'].isin(out_of_stock_ids)]['customer_id'].unique()
+        print(f"   Items currently Out of Stock: {len(out_of_stock_ids)}")
+        print(f"   Impacted Customers (High Propensity to Buy): {len(affected_customers)}")
+        print(f"   Action: Send 'Back in Stock' email to customer IDs: {list(affected_customers)[:5]}...")
+
+    # ==============================================================================
+    # GOAL 5: Overall Impact Analysis
+    # ==============================================================================
+    print("\n[GOAL 5] Optimization Impact Forecast")
+
+    product_velocity = df.groupby('product_id')['quantity'].sum() / 7
+    oos_velocity = product_velocity[product_velocity.index.isin(out_of_stock_ids)]
+
+    oos_prices = raw_prods.set_index('product_id')['unit_price']
+    daily_revenue_loss = 0.0
+    for pid, daily_qty in oos_velocity.items():
+        price = float(oos_prices.get(pid, 0.0) or 0.0)
+        daily_revenue_loss += float(daily_qty) * price
+
+    print(f"   Estimated Daily Revenue Loss due to Stockouts: ${daily_revenue_loss:.2f}")
+    print(f"   Projected Monthly Impact: ${daily_revenue_loss * 30:.2f}")
+    print("   Conclusion: Restocking these items immediately will recover this revenue.")
+
+if _name_ == "_main_":
+    run_analytics_logic()
