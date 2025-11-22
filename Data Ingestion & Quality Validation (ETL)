@@ -1,0 +1,149 @@
+
+import pandas as pd
+from datetime import datetime
+import os
+
+def clean_and_prep_data():
+    print("Okay, starting the data cleanup phase...")
+
+    # --- 1. Loading the Files ---
+   
+    files = {
+        'stores': 'stores.csv',
+        'products': 'products.csv',
+        'promos': 'promotion_details.csv',
+        'customers': 'customer_details.csv',
+        'header': 'store_sales_header.csv',
+        'lines': 'store_sales_line_items.csv'
+    }
+
+    dfs = {}
+    for name, path in files.items():
+        if os.path.exists(path):
+            dfs[name] = pd.read_csv(path)
+        else:
+            print(f"Hey, I can't find {path}. Make sure you ran the generation script first!")
+            return
+
+
+    stores = dfs['stores']
+    prods = dfs['products']
+    cust = dfs['customers']
+    promos = dfs['promos']
+    header = dfs['header']
+    lines = dfs['lines']
+    
+
+    print(f"Loaded everything. Found {len(header)} transactions to process.")
+
+    # --- 2. Handling Duplicates ---
+    # Sometimes systems glitch and send the same transaction twice.
+    # Let's check the transaction ID and remove any exact duplicates.
+
+    initial_count = len(header)
+    header.drop_duplicates(subset='transaction_id', keep='first', inplace=True)
+
+    dupes_removed = initial_count - len(header)
+    if dupes_removed > 0:
+        print(f"Found and removed {dupes_removed} duplicate transactions.")
+
+    # --- 3. Handling Date Issues ---
+
+    today = pd.to_datetime(datetime.now().date())
+
+    # Fix Header Dates
+    header['transaction_date'] = pd.to_datetime(header['transaction_date'])
+
+    # Filter: Keep only dates that are today or in the past
+    future_txns = header[header['transaction_date'] > today]
+    if not future_txns.empty:
+        print(f"Whoops, found {len(future_txns)} transactions from the future. Dropping them.")
+        header = header[header['transaction_date'] <= today]
+
+    # Fix Store Opening Dates (Just in case a store "opens" next year but has sales now)
+    stores['opening_date'] = pd.to_datetime(stores['opening_date'])
+    # If a store opens in the future, let's just set it to today to fix the data logic
+    stores.loc[stores['opening_date'] > today, 'opening_date'] = today
+
+    # --- 4. Handling Nulls & Missing IDs ---
+    # We can't have a transaction without a store or a customer.
+
+    # Drop headers where critical IDs are missing (NaN)
+    header.dropna(subset=['store_id', 'customer_id', 'transaction_id'], inplace=True)
+
+    # Drop line items where product or transaction ID is missing
+    lines.dropna(subset=['product_id', 'transaction_id'], inplace=True)
+
+    # --- 5. Handling "Orphaned" Records (The tricky part) ---
+    # This handles cases where a transaction points to a Store ID (like 'S999') that doesn't exist.
+    # We use pandas .isin() to check validity.
+
+    # Check Sales Header
+    valid_stores = stores['store_id'].unique()
+    valid_customers = cust['customer_id'].unique()
+
+    # Keep header rows ONLY if they have a valid store AND valid customer
+    header = header[
+        header['store_id'].isin(valid_stores) &
+        header['customer_id'].isin(valid_customers)
+    ]
+
+    # Check Line Items
+    # We also need to make sure line items point to a valid transaction we just cleaned
+    valid_transactions = header['transaction_id'].unique()
+    valid_products = prods['product_id'].unique()
+    valid_promos = promos['promotion_id'].unique()
+
+    # Keep lines ONLY if they have valid transaction, valid product, and valid promo (if it exists)
+    lines = lines[
+        lines['transaction_id'].isin(valid_transactions) &
+        lines['product_id'].isin(valid_products)
+    ]
+
+    # Special check for promotions: It's okay if it's null/NaN, but if it HAS a value, it better be real.
+    # We filter out rows where promo_id is NOT null AND NOT in our valid list.
+    bad_promos = lines[lines['promotion_id'].notna() & ~lines['promotion_id'].isin(valid_promos)]
+    if not bad_promos.empty:
+        print(f"Found {len(bad_promos)} lines with fake promotion IDs. Setting them to None.")
+        # Instead of dropping, let's just nullify the bad promo ID so we keep the sale
+        lines.loc[bad_promos.index, 'promotion_id'] = None
+
+    # --- 6. Fixing Negative Values ---
+    # Prices shouldn't be negative. If they are, it's probably a typo, so we'll make them positive.
+    prods['unit_price'] = prods['unit_price'].abs()
+
+    # Quantities shouldn't be negative. If they are, let's assume it's a return or error and drop it for this analysis.
+    neg_qty = lines[lines['quantity'] <= 0]
+    if not neg_qty.empty:
+        print(f"Removing {len(neg_qty)} line items with negative quantity.")
+        lines = lines[lines['quantity'] > 0]
+
+    print("Data cleaning finished. Everything looks solid now.")
+
+    # --- 7. Preparing the Master File ---
+    # Now that we have clean individual tables, let's build the dataset we need for the analysis.
+    # We merge everything onto the line items (the most granular level).
+
+    print("Building the master dataset for analysis...")
+
+    # Start with lines
+    master = lines.copy()
+
+    # Add transaction info (Date, Store, Customer)
+    master = master.merge(header[['transaction_id', 'transaction_date', 'store_id', 'customer_id']], on='transaction_id', how='left')
+
+    # Add product info (Category, Stock, Price)
+    master = master.merge(prods[['product_id', 'product_category', 'current_stock_level', 'unit_price']], on='product_id', how='left')
+
+    # Add customer info (Loyalty, Spend)
+    master = master.merge(cust[['customer_id', 'loyalty_status', 'historic_annual_spend']], on='customer_id', how='left')
+
+    # Add promotion info (Discount)
+    master = master.merge(promos[['promotion_id', 'discount_percent']], on='promotion_id', how='left')
+
+    # Save it
+    master.to_csv('clean_master_data.csv', index=False)
+    print(f"Done! Saved 'clean_master_data.csv' with {len(master)} rows ready for the model.")
+
+if _name_ == "_main_":
+    clean_and_prep_data()
